@@ -1,19 +1,31 @@
 """
-Information Equilibrium tools (IEtools.py) 0.1-beta
+Information Equilibrium tools (IEtools.py) 0.11-beta
 
 A collection of python tools to help constructing Information 
 Equilibrium or Dynamic Equilibrium models. 
 
 http://informationtransfereconomics.blogspot.com/2017/04/a-tour-of-information-equilibrium.html
 
+Imports are installed as part of Anaconda 4.4 (Python 3.6)
+
+beta versions
+0.1    Original file
+0.11   Added FRED xls support
+
 """
+
+#These packages are installed as part of Anaconda 3
 
 import csv
 import datetime
 import numpy as np
+import xlrd
 from scipy.optimize import curve_fit
 
 #File readers
+
+#TODO: Probably want to make the file object a class and turn these into methods based on extension.
+
 
 def FREDcsvRead(filename):
     """ Reads a FRED csv file and returns a dictionary where
@@ -32,6 +44,24 @@ def FREDcsvRead(filename):
             yearToDateLength = (datetime.date(theDate.year,theDate.month,theDate.day) - datetime.date(theDate.year,1,1)).days
             outputList.append([theDate.year + yearToDateLength/yearLength, float(row[1])])
     return {'name':outputName,'data':np.array(outputList)}
+
+
+def FREDxlsRead(filename):
+    """ Reads a FRED xls file and returns a dictionary where
+    'name': string with FRED name of time series
+    'data': numpy array with dates in continuous time (years) """
+    book = xlrd.open_workbook(filename)
+    sheet = book.sheet_by_index(0)
+    outputName = sheet.cell(10,1).value
+    outputList = []
+    for rowIndex in range(sheet.nrows-11):
+        theDate = datetime.date(*xlrd.xldate_as_tuple(sheet.cell(rowIndex+11,0).value,book.datemode)[0:3])
+        nextYear = int(theDate.month/12)
+        yearLength = (datetime.date(theDate.year+1,1,1) - datetime.date(theDate.year,1,1)).days
+        yearToDateLength = (datetime.date(theDate.year,theDate.month,theDate.day) - datetime.date(theDate.year,1,1)).days
+        outputList.append([theDate.year + yearToDateLength/yearLength, sheet.cell(rowIndex+11,1).value])
+    return {'name':outputName,'data':np.array(outputList)}
+
 
 #Dynamic equilibrium and entropy minimization tools
 
@@ -90,6 +120,17 @@ def dynamic_equilibrium_optimize(timeSeries, alphaRange = (-0.1,0.1), alphaDelta
     return result
 
 #Dynamic equilibrium functions and curve fitting
+
+"""
+There is probably a better way of doing this for mulitple shocks (in
+fact I know there is, and have used it). Unfortunately there is a bit
+of art in this.
+
+Future plan is to entropy min the entire data set, and then do what
+is essentially a CFAR detector that adds in shocks when they are
+detected. This can be used to forecast shocks as well as just fit 
+the data available.
+"""
 
 def shock(x,a,b,t):
     return a/(1 + np.exp((x-t)/b))
