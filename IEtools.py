@@ -9,8 +9,9 @@ http://informationtransfereconomics.blogspot.com/2017/04/a-tour-of-information-e
 Imports are installed as part of Anaconda 4.4 (Python 3.6)
 
 beta versions
-0.1    Original file
-0.11   Added FRED xls support
+0.1	Original file
+0.11	Added FRED xls support
+0.12	Added new interpolations and growth rates as part of data import
 
 """
 
@@ -20,17 +21,22 @@ import csv
 import datetime
 import numpy as np
 import xlrd
-from scipy.optimize import curve_fit
+from scipy.interpolate import interp1d
+from scipy.optimize import curve_fit, minimize
+from scipy.misc import derivative
 
 #File readers
 
 #TODO: Probably want to make the file object a class and turn these into methods based on extension.
 
 
-def FREDcsvRead(filename):
+def FREDcsvRead(filename, growth=True):
     """ Reads a FRED csv file and returns a dictionary where
     'name': string with FRED name of time series
-    'data': numpy array with dates in continuous time (years) """
+    'data': numpy array with dates in continuous time (years) 
+    'interp': a linear interpolating function for the data points
+    'growth': a linear interpolating function of the annualized 
+              continuously comp growth rate in percent"""
     csvFile = open(filename,newline='')
     outputList = []
     reader = csv.reader(csvFile)
@@ -43,13 +49,24 @@ def FREDcsvRead(filename):
             yearLength = (datetime.date(theDate.year+1,1,1) - datetime.date(theDate.year,1,1)).days
             yearToDateLength = (datetime.date(theDate.year,theDate.month,theDate.day) - datetime.date(theDate.year,1,1)).days
             outputList.append([theDate.year + yearToDateLength/yearLength, float(row[1])])
-    return {'name':outputName,'data':np.array(outputList)}
+    dataOutput =  np.array(outputList)
+    interpFunction = interp1d(dataOutput[:,0],dataOutput[:,1],bounds_error = False)
+    if growth:
+    	der=derivative(lambda t: 100*np.log(interpFunction(t)),interpFunction.x,dx=1e-6)
+    	growthFunction = interp1d(interpFunction.x,der, bounds_error = False)
+    else:
+    	growthFunction = 'disabled'
+    return {'name':outputName,'data':dataOutput,'interp':interpFunction,'growth':growthFunction}
 
 
-def FREDxlsRead(filename):
+def FREDxlsRead(filename,growth=True):
     """ Reads a FRED xls file and returns a dictionary where
-    'name': string with FRED name of time series
-    'data': numpy array with dates in continuous time (years) """
+    'name':   string with FRED name of time series
+    'data':   numpy array with dates in continuous time (years) 
+    'interp': a linear interpolating function for the data points
+    'growth': a linear interpolating function of the annualized 
+              continuously comp growth rate in percent
+	      note: disabled with option growth=False"""
     book = xlrd.open_workbook(filename)
     sheet = book.sheet_by_index(0)
     outputName = sheet.cell(10,1).value
@@ -60,7 +77,71 @@ def FREDxlsRead(filename):
         yearLength = (datetime.date(theDate.year+1,1,1) - datetime.date(theDate.year,1,1)).days
         yearToDateLength = (datetime.date(theDate.year,theDate.month,theDate.day) - datetime.date(theDate.year,1,1)).days
         outputList.append([theDate.year + yearToDateLength/yearLength, sheet.cell(rowIndex+11,1).value])
-    return {'name':outputName,'data':np.array(outputList)}
+    dataOutput =  np.array(outputList)
+    interpFunction = interp1d(dataOutput[:,0],dataOutput[:,1],bounds_error = False)
+    if growth:
+    	der=derivative(lambda t: 100*np.log(interpFunction(t)),interpFunction.x,dx=1e-6)
+    	growthFunction = interp1d(interpFunction.x,der, bounds_error = False)
+    else:
+    	growthFunction = 'disabled'
+    return {'name':outputName,'data':dataOutput,'interp':interpFunction,'growth':growthFunction}
+
+#Information equilibrium parameter fits
+
+def objectiveFunctionLogGIE(params, source, destination, minyear, maxyear, delta):
+    times = np.linspace(minyear,maxyear,num=int(np.round((maxyear-minyear)/delta)),endpoint=True)
+    result = np.sum(list(map(lambda t: np.abs(np.log(source(t))- (params[0]*np.log(destination(t)) + params[1])),times)))
+    return result
+
+def objectiveFunctionGIE(params, source, destination, minyear, maxyear, delta):
+    times = np.linspace(minyear,maxyear,num=int(np.round((maxyear-minyear)/delta)),endpoint=True)
+    result = np.sum(list(map(lambda t: np.abs(source(t)- (params[1]*(destination(t)**params[0]))),times)))
+    return result
+
+def fitGeneralInfoEq(sourceData,destinationData, guess, minyear=0,maxyear=0,delta=0,fitlog=True, method = 'SLSQP'):
+    """
+    Operates on numpy array of [time, value].
+    
+    Fits the general information equilibrium function x = a*y**k 
+    by minimizing the difference |x - a*y**k|. Returns the scipy
+    minimization result. Information 'source' is x, and 'destination'
+    is y.
+    
+    fitlog=True tells the objective function to take the logarithm of the data
+    This is useful for many exponentially growing macroeconomic observables and
+    makes the minimization more stable.
+    
+    Note: fitlog changes the meaning of the guess and result parameters. If
+    fitlog is true, the optimzation returns (and the guess format is)
+    
+    [k, c] where log(x) = k log(y) + c
+    
+    If fitlog is false, the optimization returns (and the guess format is):
+    
+    [k, a] where x = a y^k
+    
+    These parameters are obtained via scipy minimize result. If
+    
+    result = fitGeneralInfoEq(source, destination, guess = [1, 0])
+    
+    then result.x is the fit parameters [k, c].
+    """
+    if minyear == 0:
+        minyear = max(sourceData[0,0],destinationData[0,0])
+    if maxyear == 0:
+        maxyear = min(sourceData[-1,0],destinationData[-1,0])
+    if delta == 0:
+        delta1 = np.mean(np.diff(sourceData[:,0],1))
+        delta2 = np.mean(np.diff(destinationData[:,0],1))
+        delta = max(delta1,delta2)
+    sourceInterp=interp1d(sourceData[:,0],sourceData[:,1], bounds_error=False)
+    destinationInterp=interp1d(destinationData[:,0],destinationData[:,1],bounds_error=False)
+    arguments = (sourceInterp, destinationInterp, minyear, maxyear, delta)
+    if fitlog:
+        result = minimize(objectiveFunctionLogGIE, x0=guess,  args = arguments, method = method)
+    else:
+        result = minimize(objectiveFunctionGIE, x0=guess,  args = arguments, method = method)
+    return result
 
 
 #Dynamic equilibrium and entropy minimization tools
